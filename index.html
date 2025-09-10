@@ -3,340 +3,232 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Browser Face Capture for Blender</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <title>Face OSC Capture</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <style>
       body {
-        font-family: "Inter", sans-serif;
-        touch-action: manipulation; /* Prevents double-tap zoom on mobile */
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        background-color: #1a1a1a;
+        color: #e0e0e0;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        overflow: hidden;
       }
-      #video-container {
+      .container {
         position: relative;
-        width: 100%;
+        width: 90vw;
         max-width: 640px;
         margin: auto;
+        border-radius: 12px;
+        overflow: hidden;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+        background-color: #2c2c2c;
       }
-      #video {
+      video,
+      canvas {
+        display: block;
         width: 100%;
-        transform: scaleX(-1); /* Mirror view */
-        border-radius: 0.75rem;
+        height: auto;
+        transform: scaleX(-1); /* Mirror view for selfie cam */
       }
-      #overlay {
+      canvas {
         position: absolute;
         top: 0;
         left: 0;
-        width: 100%;
-        height: 100%;
+      }
+      #status {
+        position: fixed;
+        top: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+        background-color: rgba(0, 0, 0, 0.7);
+        color: white;
+        padding: 8px 16px;
+        border-radius: 20px;
+        font-size: 14px;
+        font-weight: 500;
+        z-index: 100;
+        transition: background-color 0.3s;
+      }
+      .status-connecting {
+        background-color: #e67e22;
+      }
+      .status-connected {
+        background-color: #2ecc71;
+      }
+      .status-error {
+        background-color: #e74c3c;
       }
     </style>
   </head>
-  <body class="bg-gray-900 text-white flex flex-col items-center justify-center min-h-screen p-4">
-    <div class="w-full max-w-2xl mx-auto space-y-6">
-      <div class="text-center">
-        <h1 class="text-3xl font-bold text-cyan-400">Browser Face Capture</h1>
-        <p class="text-gray-400">Sending OSC data to Blender via Foscap Addon</p>
-      </div>
-
-      <div id="video-container" class="bg-gray-800 rounded-xl shadow-lg overflow-hidden">
-        <video id="video" autoplay playsinline></video>
-        <canvas id="overlay"></canvas>
-      </div>
-
-      <div id="controls" class="bg-gray-800 p-6 rounded-xl shadow-lg space-y-4">
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-center">
-          <div class="bg-gray-700 p-3 rounded-lg">
-            <p class="text-sm text-gray-400">Your Phone's IP</p>
-            <p id="local-ip" class="font-mono text-lg text-green-400">Finding...</p>
-          </div>
-          <div class="bg-gray-700 p-3 rounded-lg">
-            <p class="text-sm text-gray-400">Status</p>
-            <p id="status" class="font-mono text-lg text-yellow-400">Idle</p>
-          </div>
-        </div>
-
-        <!-- New IP Address Input Field -->
-        <div class="space-y-2 pt-2">
-          <label for="ip-input" class="block text-sm font-medium text-gray-300">Blender PC IP Address</label>
-          <input
-            type="text"
-            id="ip-input"
-            class="w-full bg-gray-900 border border-gray-600 text-white font-mono rounded-lg p-3 focus:ring-cyan-500 focus:border-cyan-500"
-            placeholder="e.g., 192.168.1.100" />
-        </div>
-
-        <div class="pt-2">
-          <button
-            id="start-button"
-            class="w-full bg-cyan-500 hover:bg-cyan-600 text-white font-bold py-3 px-4 rounded-lg transition duration-300 text-xl shadow-md">
-            Start Capture
-          </button>
-        </div>
-      </div>
+  <body>
+    <div id="status" class="status-connecting">Connecting...</div>
+    <div class="container">
+      <video id="video-input" style="visibility: hidden"></video>
+      <canvas id="output-canvas"></canvas>
     </div>
 
-    <!-- MediaPipe and FaceLandmarker scripts -->
     <script type="module">
-      import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+      const videoElement = document.getElementById("video-input");
+      const canvasElement = document.getElementById("output-canvas");
+      const canvasCtx = canvasElement.getContext("2d");
+      const statusElement = document.getElementById("status");
 
-      // --- DOM Elements ---
-      const video = document.getElementById("video");
-      const startButton = document.getElementById("start-button");
-      const statusEl = document.getElementById("status");
-      const ipEl = document.getElementById("local-ip");
-      const ipInput = document.getElementById("ip-input");
+      let ws;
+      const OSC_ADDRESS = "/HT/Generic"; // FOSCAP expects this address
 
-      // --- Configuration ---
-      const RELAY_PORT = 8080;
-
-      let faceLandmarker;
-      let runningMode = "VIDEO";
-      let lastVideoTime = -1;
-      let streamActive = false;
-      let websocket;
-
-      // --- Main Setup Function ---
-      async function setup() {
-        statusEl.textContent = "Loading Model...";
-        const filesetResolver = await FilesetResolver.forVisionTasks(
-          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
-        );
-        faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
-          baseOptions: {
-            modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`,
-            delegate: "GPU",
-          },
-          outputFaceBlendshapes: true,
-          outputFacialTransformationMatrixes: true,
-          runningMode,
-          numFaces: 1,
-        });
-        statusEl.textContent = "Ready";
-        startButton.disabled = false;
-        startButton.textContent = "Start Capture";
+      function updateStatus(message, statusClass) {
+        statusElement.textContent = message;
+        statusElement.className = `status-${statusClass}`;
       }
 
-      // --- Load Saved IP from localStorage ---
-      function loadSavedIP() {
-        const savedIP = localStorage.getItem("blenderIP");
-        if (savedIP) {
-          ipInput.value = savedIP;
-        }
-      }
-
-      setup();
-      loadSavedIP();
-
-      // --- WebSocket Logic ---
       function connectWebSocket() {
-        const blenderIP = ipInput.value.trim();
-        if (!blenderIP) {
-          // This check is now primarily in the start button's logic
-          statusEl.textContent = "IP Required";
-          return;
-        }
+        // Connect to the server using the same host that served the page
+        const wsUrl = `ws://${window.location.host}`;
+        ws = new WebSocket(wsUrl);
 
-        const WEBSOCKET_URL = `ws://${blenderIP}:${RELAY_PORT}`;
-        statusEl.textContent = "Connecting...";
-        websocket = new WebSocket(WEBSOCKET_URL);
-
-        websocket.onopen = () => {
+        ws.onopen = () => {
           console.log("WebSocket connection established.");
-          statusEl.textContent = "Streaming...";
-          statusEl.classList.remove("text-yellow-400", "text-red-400");
-          statusEl.classList.add("text-green-400");
+          updateStatus("Connected to Relay", "connected");
         };
 
-        websocket.onclose = () => {
-          console.log("WebSocket connection closed.");
-          if (streamActive) {
-            statusEl.textContent = "Disconnected";
-            statusEl.classList.remove("text-green-400");
-            statusEl.classList.add("text-red-400");
-            // No automatic reconnect, user should check IP and restart
-          }
+        ws.onclose = (event) => {
+          console.log("WebSocket connection closed:", event.reason);
+          updateStatus("Disconnected. Retrying...", "error");
+          // Retry connection after 2 seconds
+          setTimeout(connectWebSocket, 2000);
         };
 
-        websocket.onerror = (error) => {
-          console.error("WebSocket Error:", error);
-          statusEl.textContent = "Connection Error";
-          statusEl.classList.remove("text-green-400");
-          statusEl.classList.add("text-red-400");
+        ws.onerror = (error) => {
+          console.error("WebSocket error:", error);
+          updateStatus("Connection Error", "error");
+          ws.close(); // This will trigger the onclose reconnect logic
         };
       }
 
-      // --- Face Tracking Loop ---
-      async function predictWebcam() {
-        if (video.currentTime !== lastVideoTime) {
-          lastVideoTime = video.currentTime;
-          const results = faceLandmarker.detectForVideo(video, Date.now());
-          if (
-            results.faceBlendshapes &&
-            results.faceBlendshapes.length > 0 &&
-            results.facialTransformationMatrixes[0]
-          ) {
-            const blendshapes = results.faceBlendshapes[0].categories;
-            const transformMatrix = results.facialTransformationMatrixes[0].data;
+      function onResults(results) {
+        const canvasWidth = canvasElement.width;
+        const canvasHeight = canvasElement.height;
 
-            const packet = createLiveLinkPacket(blendshapes, transformMatrix);
-            if (websocket && websocket.readyState === WebSocket.OPEN) {
-              websocket.send(packet);
-            }
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, canvasWidth, canvasHeight);
+        canvasCtx.drawImage(results.image, 0, 0, canvasWidth, canvasHeight);
+
+        if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+          const landmarks = results.multiFaceLandmarks[0];
+
+          // Draw landmarks for visual feedback (optional)
+          for (const landmark of landmarks) {
+            const x = landmark.x * canvasWidth;
+            const y = landmark.y * canvasHeight;
+            canvasCtx.beginPath();
+            canvasCtx.arc(x, y, 1, 0, 2 * Math.PI);
+            canvasCtx.fillStyle = "#3498db";
+            canvasCtx.fill();
+          }
+
+          // Send data over WebSocket if connected
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            sendOscData(landmarks);
           }
         }
-
-        if (streamActive) {
-          window.requestAnimationFrame(predictWebcam);
-        }
+        canvasCtx.restore();
       }
 
-      // --- Data Packet Creation ---
-      function createLiveLinkPacket(blendshapes, matrix) {
-        const blendshapeMap = {
-          eyeBlinkLeft: 41,
-          eyeBlinkRight: 42,
-          eyeLookInLeft: 3,
-          eyeLookInRight: 2,
-          eyeLookOutLeft: 5,
-          eyeLookOutRight: 4,
-          eyeWideLeft: 43,
-          eyeWideRight: 44,
-          jawOpen: 37,
-          mouthClose: 27,
-          mouthFunnel: 19,
-          mouthPucker: 20,
-          mouthSmileLeft: 24,
-          mouthSmileRight: 23,
-        };
+      function sendOscData(landmarks) {
+        // FOSCAP expects a specific binary format.
+        // 1. OSC Address (string, null-terminated, padded to a multiple of 4 bytes)
+        // 2. OSC Type Tag string (e.g., ",b" for blob, padded)
+        // 3. Blob size (32-bit integer)
+        // 4. Blob data (the actual landmark floats)
 
-        const blendshapeData = new Array(61).fill(0.0);
-        for (const shape of blendshapes) {
-          const index = blendshapeMap[shape.categoryName];
-          if (index !== undefined) {
-            blendshapeData[index] = shape.score;
-          }
-        }
+        const numFloats = landmarks.length * 3; // x, y, z for each landmark
+        const dataSize = numFloats * 4; // 4 bytes per float
 
-        const [pitch, yaw, roll] = matrixToEuler(matrix);
+        // Prepare address and type tag strings with padding
+        const addressPadded = padString(OSC_ADDRESS);
+        const typeTagPadded = padString(",b");
 
-        blendshapeData[52] = -roll;
-        blendshapeData[53] = -pitch;
-        blendshapeData[54] = -yaw;
-
-        const deviceName = "Browser";
-        const buffer = new ArrayBuffer(4 + 37 + 4 + deviceName.length + 17 + 61 * 4);
+        const totalSize = addressPadded.length + typeTagPadded.length + 4 + dataSize;
+        const buffer = new ArrayBuffer(totalSize);
         const dataView = new DataView(buffer);
+
         let offset = 0;
 
-        dataView.setInt32(offset, 5, true);
-        offset += 4;
-
-        const uuid = "D9616524-1B12-4264-9A62-2E0E57283584".padEnd(37, "\0");
-        for (let i = 0; i < uuid.length; i++) {
-          dataView.setUint8(offset + i, uuid.charCodeAt(i));
+        // Write OSC address
+        for (let i = 0; i < addressPadded.length; i++) {
+          dataView.setUint8(offset++, addressPadded.charCodeAt(i));
         }
-        offset += 37;
 
-        dataView.setInt32(offset, deviceName.length, false);
-        offset += 4;
-        for (let i = 0; i < deviceName.length; i++) {
-          dataView.setUint8(offset + i, deviceName.charCodeAt(i));
+        // Write OSC type tag
+        for (let i = 0; i < typeTagPadded.length; i++) {
+          dataView.setUint8(offset++, typeTagPadded.charCodeAt(i));
         }
-        offset += deviceName.length;
 
-        dataView.setInt32(offset, Math.floor(video.currentTime * 60));
+        // Write blob size
+        dataView.setInt32(offset, dataSize, false); // Big-endian
         offset += 4;
-        dataView.setFloat32(offset, 0.0);
-        offset += 4;
-        dataView.setInt32(offset, 60);
-        offset += 4;
-        dataView.setInt32(offset, 1);
-        offset += 4;
-        dataView.setUint8(offset, 61);
-        offset += 1;
 
-        for (let i = 0; i < 61; i++) {
-          dataView.setFloat32(offset, blendshapeData[i], false);
+        // Write landmark data
+        for (const landmark of landmarks) {
+          // Invert X because of selfie-camera mirroring
+          dataView.setFloat32(offset, 1.0 - landmark.x, false);
+          offset += 4;
+          dataView.setFloat32(offset, landmark.y, false);
+          offset += 4;
+          dataView.setFloat32(offset, landmark.z, false);
           offset += 4;
         }
 
-        return buffer;
+        ws.send(buffer);
       }
 
-      function matrixToEuler(matrix) {
-        const sy = Math.sqrt(matrix[0] * matrix[0] + matrix[1] * matrix[1]);
-        const singular = sy < 1e-6;
-        let x, y, z;
-        if (!singular) {
-          x = Math.atan2(matrix[6], matrix[10]);
-          y = Math.atan2(-matrix[2], sy);
-          z = Math.atan2(matrix[1], matrix[0]);
-        } else {
-          x = Math.atan2(-matrix[9], matrix[5]);
-          y = Math.atan2(-matrix[2], sy);
-          z = 0;
+      // Helper to pad strings for OSC
+      function padString(str) {
+        let padded = str + "\0"; // Null terminator
+        while (padded.length % 4 !== 0) {
+          padded += "\0";
         }
-        return [x, y, z];
+        return padded;
       }
 
-      // --- Event Listeners ---
-      startButton.addEventListener("click", async () => {
-        if (streamActive) {
-          streamActive = false;
-          ipInput.disabled = false; // Re-enable IP input
-          video.srcObject.getTracks().forEach((track) => track.stop());
-          video.srcObject = null;
-          startButton.textContent = "Start Capture";
-          startButton.classList.remove("bg-red-500", "hover:bg-red-600");
-          startButton.classList.add("bg-cyan-500", "hover:bg-cyan-600");
-          if (websocket) websocket.close();
-          statusEl.textContent = "Idle";
-          statusEl.classList.remove("text-green-400", "text-red-400");
-          statusEl.classList.add("text-yellow-400");
-        } else {
-          const blenderIP = ipInput.value.trim();
-          if (!blenderIP) {
-            alert("Please enter the IP address of the computer running the relay server.");
-            return;
-          }
-          localStorage.setItem("blenderIP", blenderIP); // Save the IP
+      // --- Main execution ---
+      connectWebSocket();
 
-          streamActive = true;
-          ipInput.disabled = true; // Disable IP input while streaming
-          startButton.textContent = "Stop Capture";
-          startButton.classList.remove("bg-cyan-500", "hover:bg-cyan-600");
-          startButton.classList.add("bg-red-500", "hover:bg-red-600");
-
-          const stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: "user" },
-          });
-          video.srcObject = stream;
-          video.addEventListener("loadeddata", () => {
-            connectWebSocket();
-            predictWebcam();
-          });
-        }
+      const faceMesh = new FaceMesh({
+        locateFile: (file) => {
+          return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
+        },
       });
 
-      function findLocalIP() {
-        try {
-          const pc = new RTCPeerConnection({ iceServers: [] });
-          pc.createDataChannel("");
-          pc.createOffer().then((offer) => pc.setLocalDescription(offer));
-          pc.onicecandidate = (ice) => {
-            if (ice && ice.candidate && ice.candidate.candidate) {
-              const ip = /([0-9]{1,3}(\.[0-9]{1,3}){3})/.exec(ice.candidate.candidate)[1];
-              ipEl.textContent = ip;
-              pc.onicecandidate = null;
-            }
-          };
-        } catch (e) {
-          console.error("Could not find local IP", e);
-          ipEl.textContent = "Unknown";
-        }
-      }
+      faceMesh.setOptions({
+        maxNumFaces: 1,
+        refineLandmarks: true,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      });
 
-      findLocalIP();
+      faceMesh.onResults(onResults);
+
+      const camera = new Camera(videoElement, {
+        onFrame: async () => {
+          await faceMesh.send({ image: videoElement });
+        },
+        facingMode: "user", // Use front camera
+        width: 640,
+        height: 480,
+      });
+
+      camera.start().catch((err) => {
+        console.error("Camera start failed:", err);
+        updateStatus("Camera permission denied!", "error");
+      });
     </script>
   </body>
 </html>
